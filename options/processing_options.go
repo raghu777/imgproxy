@@ -61,6 +61,8 @@ type WatermarkOptions struct {
 
 type ProcessingOptions struct {
 	ResizingType      ResizeType
+	S3B               string
+	TTL               int64
 	Width             int
 	Height            int
 	MinWidth          int
@@ -119,6 +121,8 @@ type ProcessingOptions struct {
 func NewProcessingOptions() *ProcessingOptions {
 	po := ProcessingOptions{
 		ResizingType:      ResizeFit,
+		TTL:               int64(config.TTL),
+		S3B:               "",
 		Width:             0,
 		Height:            0,
 		ZoomWidth:         1,
@@ -814,6 +818,24 @@ func applyFilenameOption(po *ProcessingOptions, args []string) error {
 	return nil
 }
 
+func applyTTLOption(po *ProcessingOptions, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("Invalid TTL arguments: %v", args)
+	}
+
+	ttl, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("Invalid TTL argument: %v", args[0])
+	}
+
+	if ttl < 0 {
+		return nil
+	}
+	po.TTL = ttl
+
+	return nil
+}
+
 func applyExpiresOption(po *ProcessingOptions, args []string) error {
 	if len(args) > 1 {
 		return fmt.Errorf("Invalid expires arguments: %v", args)
@@ -962,6 +984,15 @@ func applyMaxAnimationFrameResolutionOption(po *ProcessingOptions, args []string
 	} else {
 		return fmt.Errorf("Invalid max_animation_frame_resolution: %s", args[0])
 	}
+	return nil
+}
+
+func applyS3BucketOption(po *ProcessingOptions, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("Invalid s3 arguments: %v", args)
+	}
+
+	po.S3B = args[0]
 
 	return nil
 }
@@ -1040,10 +1071,15 @@ func applyURLOption(po *ProcessingOptions, name string, args []string) error {
 		return applyCacheBusterOption(po, args)
 	case "expires", "exp":
 		return applyExpiresOption(po, args)
+	case "ttl":
+		return applyTTLOption(po, args)
 	case "filename", "fn":
 		return applyFilenameOption(po, args)
 	case "return_attachment", "att":
 		return applyReturnAttachmentOption(po, args)
+	// Source Options
+	case "s3b":
+		return applyS3BucketOption(po, args)
 	// Presets
 	case "preset", "pr":
 		return applyPresetOption(po, args)
@@ -1195,6 +1231,10 @@ func ParsePath(path string, headers http.Header) (*ProcessingOptions, string, er
 
 	if err != nil {
 		return nil, "", ierrors.New(404, err.Error(), "Invalid URL")
+	}
+
+	if len(po.S3B) > 0 {
+		imageURL = fmt.Sprintf("s3://%s/%s", po.S3B, imageURL)
 	}
 
 	return po, imageURL, nil

@@ -55,9 +55,8 @@ func initProcessingHandler() {
 	headerVaryValue = strings.Join(vary, ", ")
 }
 
-func setCacheControl(rw http.ResponseWriter, force *time.Time, originHeaders map[string]string) {
+func setCacheControl(rw http.ResponseWriter, force *time.Time, originHeaders map[string]string, ttl int64) {
 	var cacheControl, expires string
-	var ttl int
 
 	if force != nil {
 		rw.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int(time.Until(*force).Seconds())))
@@ -75,9 +74,8 @@ func setCacheControl(rw http.ResponseWriter, force *time.Time, originHeaders map
 	}
 
 	if len(cacheControl) == 0 && len(expires) == 0 {
-		ttl = config.TTL
 		if _, ok := originHeaders["Fallback-Image"]; ok && config.FallbackImageTTL > 0 {
-			ttl = config.FallbackImageTTL
+			ttl = int64(config.FallbackImageTTL)
 		}
 		cacheControl = fmt.Sprintf("max-age=%d, public", ttl)
 		expires = time.Now().Add(time.Second * time.Duration(ttl)).Format(http.TimeFormat)
@@ -121,7 +119,13 @@ func respondWithImage(reqID string, r *http.Request, rw http.ResponseWriter, sta
 		rw.Header().Set("Content-DPR", strconv.FormatFloat(po.Dpr, 'f', 2, 32))
 	}
 
-	setCacheControl(rw, po.Expires, originData.Headers)
+	setCacheControl(rw, po.Expires, originData.Headers, po.TTL)
+	if config.SetCanonicalHeader {
+		if strings.HasPrefix(originURL, "https://") || strings.HasPrefix(originURL, "http://") {
+			linkHeader := fmt.Sprintf(`<%s>; rel="canonical"`, originURL)
+			rw.Header().Set("Link", linkHeader)
+		}
+	}
 	setVary(rw)
 	setCanonical(rw, originURL)
 
@@ -149,7 +153,7 @@ func respondWithImage(reqID string, r *http.Request, rw http.ResponseWriter, sta
 }
 
 func respondWithNotModified(reqID string, r *http.Request, rw http.ResponseWriter, po *options.ProcessingOptions, originURL string, originHeaders map[string]string) {
-	setCacheControl(rw, po.Expires, originHeaders)
+	setCacheControl(rw, po.Expires, originHeaders, po.TTL)
 	setVary(rw)
 
 	rw.WriteHeader(304)
@@ -213,21 +217,19 @@ func handleProcessing(reqID string, rw http.ResponseWriter, r *http.Request) {
 	}
 
 	path = strings.TrimPrefix(path, "/")
-	signature := ""
 
-	if signatureEnd := strings.IndexByte(path, '/'); signatureEnd > 0 {
-		signature = path[:signatureEnd]
-		path = path[signatureEnd:]
-	} else {
-		sendErrAndPanic(ctx, "path_parsing", ierrors.New(
-			404, fmt.Sprintf("Invalid path: %s", path), "Invalid URL",
-		))
-	}
+	if len(config.Keys) > 0 {
+		signature := ""
+		if signatureEnd := strings.IndexByte(path, '/'); signatureEnd > 0 {
+			signature = path[:signatureEnd]
+			path = path[signatureEnd:]
+		} else {
+			panic(ierrors.New(404, fmt.Sprintf("Invalid path: %s", path), "Invalid URL"))
+		}
 
-	path = fixPath(path)
-
-	if err := security.VerifySignature(signature, path); err != nil {
-		sendErrAndPanic(ctx, "security", ierrors.New(403, err.Error(), "Forbidden"))
+		if err := security.VerifySignature(signature, path); err != nil {
+			panic(ierrors.New(403, err.Error(), "Forbidden"))
+		}
 	}
 
 	po, imageURL, err := options.ParsePath(path, r.Header)
