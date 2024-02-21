@@ -1,9 +1,11 @@
 package options
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -178,15 +180,6 @@ func (po *ProcessingOptions) GetQuality() int {
 	}
 
 	return q
-}
-
-func (po *ProcessingOptions) isPresetUsed(name string) bool {
-	for _, usedName := range po.UsedPresets {
-		if usedName == name {
-			return true
-		}
-	}
-	return false
 }
 
 func (po *ProcessingOptions) Diff() structdiff.Entries {
@@ -692,17 +685,17 @@ func applyPixelateOption(po *ProcessingOptions, args []string) error {
 	return nil
 }
 
-func applyPresetOption(po *ProcessingOptions, args []string) error {
+func applyPresetOption(po *ProcessingOptions, args []string, usedPresets ...string) error {
 	for _, preset := range args {
 		if p, ok := presets[preset]; ok {
-			if po.isPresetUsed(preset) {
+			if slices.Contains(usedPresets, preset) {
 				log.Warningf("Recursive preset usage is detected: %s", preset)
 				continue
 			}
 
 			po.UsedPresets = append(po.UsedPresets, preset)
 
-			if err := applyURLOptions(po, p); err != nil {
+			if err := applyURLOptions(po, p, append(usedPresets, preset)...); err != nil {
 				return err
 			}
 		} else {
@@ -736,16 +729,16 @@ func applyWatermarkOption(po *ProcessingOptions, args []string) error {
 	}
 
 	if len(args) > 2 && len(args[2]) > 0 {
-		if x, err := strconv.Atoi(args[2]); err == nil {
-			po.Watermark.Gravity.X = float64(x)
+		if x, err := strconv.ParseFloat(args[2], 64); err == nil {
+			po.Watermark.Gravity.X = x
 		} else {
 			return fmt.Errorf("Invalid watermark X offset: %s", args[2])
 		}
 	}
 
 	if len(args) > 3 && len(args[3]) > 0 {
-		if y, err := strconv.Atoi(args[3]); err == nil {
-			po.Watermark.Gravity.Y = float64(y)
+		if y, err := strconv.ParseFloat(args[3], 64); err == nil {
+			po.Watermark.Gravity.Y = y
 		} else {
 			return fmt.Errorf("Invalid watermark Y offset: %s", args[3])
 		}
@@ -809,11 +802,20 @@ func applyRawOption(po *ProcessingOptions, args []string) error {
 }
 
 func applyFilenameOption(po *ProcessingOptions, args []string) error {
-	if len(args) > 1 {
+	if len(args) > 2 {
 		return fmt.Errorf("Invalid filename arguments: %v", args)
 	}
 
 	po.Filename = args[0]
+
+	if len(args) > 1 && parseBoolOption(args[1]) {
+		decoded, err := base64.RawURLEncoding.DecodeString(po.Filename)
+		if err != nil {
+			return fmt.Errorf("Invalid filename encoding: %s", err)
+		}
+
+		po.Filename = string(decoded)
+	}
 
 	return nil
 }
@@ -997,7 +999,7 @@ func applyS3BucketOption(po *ProcessingOptions, args []string) error {
 	return nil
 }
 
-func applyURLOption(po *ProcessingOptions, name string, args []string) error {
+func applyURLOption(po *ProcessingOptions, name string, args []string, usedPresets ...string) error {
 	switch name {
 	case "resize", "rs":
 		return applyResizeOption(po, args)
@@ -1082,7 +1084,7 @@ func applyURLOption(po *ProcessingOptions, name string, args []string) error {
 		return applyS3BucketOption(po, args)
 	// Presets
 	case "preset", "pr":
-		return applyPresetOption(po, args)
+		return applyPresetOption(po, args, usedPresets...)
 	// Security
 	case "max_src_resolution", "msr":
 		return applyMaxSrcResolutionOption(po, args)
@@ -1097,9 +1099,9 @@ func applyURLOption(po *ProcessingOptions, name string, args []string) error {
 	return fmt.Errorf("Unknown processing option: %s", name)
 }
 
-func applyURLOptions(po *ProcessingOptions, options urlOptions) error {
+func applyURLOptions(po *ProcessingOptions, options urlOptions, usedPresets ...string) error {
 	for _, opt := range options {
-		if err := applyURLOption(po, opt.Name, opt.Args); err != nil {
+		if err := applyURLOption(po, opt.Name, opt.Args, usedPresets...); err != nil {
 			return err
 		}
 	}
@@ -1123,19 +1125,23 @@ func defaultProcessingOptions(headers http.Header) (*ProcessingOptions, error) {
 	}
 
 	if config.EnableClientHints {
-		if headerDPR := headers.Get("DPR"); len(headerDPR) > 0 {
+		headerDPR := headers.Get("Sec-CH-DPR")
+		if len(headerDPR) == 0 {
+			headerDPR = headers.Get("DPR")
+		}
+		if len(headerDPR) > 0 {
 			if dpr, err := strconv.ParseFloat(headerDPR, 64); err == nil && (dpr > 0 && dpr <= maxClientHintDPR) {
 				po.Dpr = dpr
 			}
 		}
-		if headerViewportWidth := headers.Get("Viewport-Width"); len(headerViewportWidth) > 0 {
-			if vw, err := strconv.Atoi(headerViewportWidth); err == nil {
-				po.Width = vw
-			}
+
+		headerWidth := headers.Get("Sec-CH-Width")
+		if len(headerWidth) == 0 {
+			headerWidth = headers.Get("Width")
 		}
-		if headerWidth := headers.Get("Width"); len(headerWidth) > 0 {
+		if len(headerWidth) > 0 {
 			if w, err := strconv.Atoi(headerWidth); err == nil {
-				po.Width = imath.Scale(w, 1/po.Dpr)
+				po.Width = imath.Shrink(w, po.Dpr)
 			}
 		}
 	}
@@ -1174,7 +1180,7 @@ func parsePathOptions(parts []string, headers http.Header) (*ProcessingOptions, 
 		return nil, "", err
 	}
 
-	if len(extension) > 0 {
+	if !po.Raw && len(extension) > 0 {
 		if err = applyFormatOption(po, []string{extension}); err != nil {
 			return nil, "", err
 		}
@@ -1201,7 +1207,7 @@ func parsePathPresets(parts []string, headers http.Header) (*ProcessingOptions, 
 		return nil, "", err
 	}
 
-	if len(extension) > 0 {
+	if !po.Raw && len(extension) > 0 {
 		if err = applyFormatOption(po, []string{extension}); err != nil {
 			return nil, "", err
 		}

@@ -18,7 +18,7 @@ var ErrSourceImageTypeNotSupported = ierrors.New(422, "Source image type not sup
 var downloadBufPool *bufpool.Pool
 
 func initRead() {
-	downloadBufPool = bufpool.New("download", config.Concurrency, config.DownloadBufferSize)
+	downloadBufPool = bufpool.New("download", config.Workers, config.DownloadBufferSize)
 }
 
 func readAndCheckImage(r io.Reader, contentLength int, secopts security.Options) (*ImageData, error) {
@@ -42,22 +42,23 @@ func readAndCheckImage(r io.Reader, contentLength int, secopts security.Options)
 			return nil, ErrSourceImageTypeNotSupported
 		}
 
-		return nil, checkTimeoutErr(err)
+		return nil, wrapError(err)
 	}
 
 	if err = security.CheckDimensions(meta.Width(), meta.Height(), 1, secopts); err != nil {
 		buf.Reset()
 		cancel()
-		return nil, err
+
+		return nil, wrapError(err)
 	}
 
-	if contentLength > buf.Cap() {
-		buf.Grow(contentLength - buf.Len())
-	}
+	downloadBufPool.GrowBuffer(buf, contentLength)
 
 	if err = br.Flush(); err != nil {
+		buf.Reset()
 		cancel()
-		return nil, checkTimeoutErr(err)
+
+		return nil, wrapError(err)
 	}
 
 	return &ImageData{
