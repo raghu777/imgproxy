@@ -60,14 +60,13 @@ func initProcessingHandler() {
 func setCacheControl(rw http.ResponseWriter, force *time.Time, originHeaders map[string]string, ttl int64) {
 	var cacheControl, expires string
 
-	ttl := -1
 
 	if _, ok := originHeaders["Fallback-Image"]; ok && config.FallbackImageTTL > 0 {
-		ttl = config.FallbackImageTTL
+		ttl = int64(config.FallbackImageTTL)
 	}
 
 	if force != nil && (ttl < 0 || force.Before(time.Now().Add(time.Duration(ttl)*time.Second))) {
-		ttl = imath.Min(config.TTL, imath.Max(0, int(time.Until(*force).Seconds())))
+		ttl = int64(imath.Min(config.TTL, imath.Max(0, int(time.Until(*force).Seconds()))))
 	}
 
 	if config.CacheControlPassthrough && ttl < 0 && originHeaders != nil {
@@ -78,7 +77,7 @@ func setCacheControl(rw http.ResponseWriter, force *time.Time, originHeaders map
 
 		if val, ok := originHeaders["Expires"]; ok && len(val) > 0 {
 			if t, err := time.Parse(http.TimeFormat, val); err == nil {
-				ttl = imath.Max(0, int(time.Until(t).Seconds()))
+				ttl = int64(imath.Max(0, int(time.Until(t).Seconds())))
 			}
 		}
 	}
